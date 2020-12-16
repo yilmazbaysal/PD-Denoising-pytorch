@@ -43,8 +43,9 @@ def denoiser(Img, c, pss, model, model_est, opt):
     INoisy = np2ts(noisy_img, opt.color)
     INoisy = torch.clamp(INoisy, 0., 1.)
     True_Res = INoisy - ISource
-    ISource, INoisy, True_Res = Variable(ISource.cuda(),volatile=True), Variable(INoisy.cuda(),volatile=True), Variable(True_Res.cuda(),volatile=True)
-    
+
+    with torch.no_grad():
+        ISource, INoisy, True_Res = Variable(ISource), Variable(INoisy), Variable(True_Res)
     
     if opt.mode == "MC":
         # obtain the corrresponding input_map
@@ -59,7 +60,8 @@ def denoiser(Img, c, pss, model, model_est, opt):
             noise_map = np.zeros((1, 2 * c, Img.shape[0], Img.shape[1]))  #initialize the noise map
             noise_map[0, :, :, :] = np.reshape(np.tile(noise_level_list_n, Img.shape[0] * Img.shape[1]), (2*c, Img.shape[0], Img.shape[1]))
             NM_tensor = torch.from_numpy(noise_map).type(torch.FloatTensor)
-            NM_tensor = Variable(NM_tensor.cuda(),volatile=True)
+            with torch.no_grad():
+                NM_tensor = Variable(NM_tensor)
         #use the estimated noise-level map for blind denoising
         elif opt.cond == 1:  #if we use the estimated map directly
             NM_tensor = torch.clamp(model_est(INoisy), 0., 1.)
@@ -69,17 +71,21 @@ def denoiser(Img, c, pss, model, model_est, opt):
                 noise_estimation_table = np.reshape(NM_tensor_bundle[1], (2 * c,))
             if opt.zeroout == 1:
                 NM_tensor = zeroing_out_maps(NM_tensor, opt.keep_ind)
-        Res = model(INoisy, NM_tensor)
+
+        # Res = model(INoisy, NM_tensor)
+        NM_tensor, Res = model(INoisy)
 
     elif opt.mode == "B":
         Res = model(INoisy)
 
-    Out = torch.clamp(INoisy-Res, 0., 1.)  #Output image after denoising
+    # Out = torch.clamp(INoisy-Res, 0., 1.)  #Output image after denoising
+    Out = Res
     
     #get the maximum denoising result
-    max_NM_tensor = level_refine(NM_tensor, 1, 2*c)[0]
-    max_Res = model(INoisy, max_NM_tensor)
-    max_Out = torch.clamp(INoisy - max_Res, 0., 1.)
+    max_NM_tensor = level_refine(NM_tensor, 1, NM_tensor.shape[1])[0]
+    tmp_NM_tensor, max_Res = model(INoisy, max_NM_tensor)
+    # max_Out = torch.clamp(INoisy - max_Res, 0., 1.)
+    max_Out = max_Res
     max_out_numpy = visual_va2np(max_Out, opt.color, opt.ps, pss, 1, opt.rescale, w, h, c)
     del max_Out
     del max_Res
@@ -98,13 +104,18 @@ def denoiser(Img, c, pss, model, model_est, opt):
                 if opt.color == 0:  #if gray image
                     re_test = np.expand_dims(re_test[:, :, :, 0], 3)
                 re_test_tensor = torch.from_numpy(np.transpose(re_test, (0,3,1,2))).type(torch.FloatTensor)
-                re_test_tensor = Variable(re_test_tensor.cuda(),volatile=True)
-                re_NM_tensor = torch.clamp(model_est(re_test_tensor), 0., 1.)
+
+                with torch.no_grad():
+                    re_test_tensor = Variable(re_test_tensor)
+
+                re_NM_tensor = torch.clamp(model.module.fcn(re_test_tensor), 0., 1.)
+
                 if opt.refine == 1:  #if we need to refine the map before putting it to the denoiser
-                        re_NM_tensor_bundle = level_refine(re_NM_tensor, opt.refine_opt, 2*c)  #refine_opt can be max, freq and their average
+                        re_NM_tensor_bundle = level_refine(re_NM_tensor, opt.refine_opt, re_NM_tensor.shape[1])  #refine_opt can be max, freq and their average
                         re_NM_tensor = re_NM_tensor_bundle[0]
-                re_Res = model(re_test_tensor, re_NM_tensor)
-                Out2 = torch.clamp(re_test_tensor - re_Res, 0., 1.)
+                tmp_NM_tensor, re_Res = model(re_test_tensor, re_NM_tensor)
+                # Out2 = torch.clamp(re_test_tensor - re_Res, 0., 1.)
+                Out2 = re_Res
                 out_numpy[row*pss+column,:,:,:] = Out2.data.cpu().numpy()
                 del Out2
                 del re_Res

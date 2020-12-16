@@ -2,7 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import numpy as np
-from skimage.measure.simple_metrics import compare_psnr
+from skimage.metrics.simple_metrics import peak_signal_noise_ratio
 from torch.autograd import Variable
 import cv2
 import scipy.ndimage
@@ -27,7 +27,7 @@ def batch_PSNR(img, imclean, data_range):
     Iclean = imclean.data.cpu().numpy().astype(np.float32)
     PSNR = 0
     for i in range(Img.shape[0]):
-        PSNR += compare_psnr(Iclean[i,:,:,:], Img[i,:,:,:], data_range=data_range)
+        PSNR += peak_signal_noise_ratio(Iclean[i,:,:,:], Img[i,:,:,:], data_range=data_range)
     return (PSNR/Img.shape[0])
 
 def data_augmentation(image, mode):
@@ -308,7 +308,8 @@ def level_refine(NM_tensor, ref_mode, chn=3):
             noise_map[n,:,:,:] = np.reshape(np.tile(nl_list[n], NM_tensor.size()[2] * NM_tensor.size()[3]),
                                           (chn, NM_tensor.size()[2], NM_tensor.size()[3]))
         RF_tensor = torch.from_numpy(noise_map).type(torch.FloatTensor)
-        RF_tensor = Variable(RF_tensor.cuda(),volatile=True)
+        with torch.no_grad():
+            RF_tensor = Variable(RF_tensor)
 
     elif ref_mode == 2:
         RF_tensor = get_smooth_maps(NM_tensor, 10, 5)
@@ -320,7 +321,8 @@ def level_refine(NM_tensor, ref_mode, chn=3):
         noise_map[0, :, :, :] = np.reshape(np.tile(nl_list, NM_tensor.size()[2] * NM_tensor.size()[3]),
                                           (chn, NM_tensor.size()[2], NM_tensor.size()[3]))
         RF_tensor = torch.from_numpy(noise_map).type(torch.FloatTensor)
-        RF_tensor = Variable(RF_tensor.cuda(),volatile=True)
+        with torch.no_grad():
+            RF_tensor = Variable(RF_tensor)
     
 
     return (RF_tensor, nl_list) 

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import cv2
 import os
 import argparse
@@ -60,14 +62,18 @@ def main():
     net = DnCNN_c(channels=c, num_of_layers=opt.num_of_layers, num_of_est = 2 * c)
     est_net = Estimation_direct(c, 2 * c)
 
+    from models_new import Network
+
     device_ids = [0]
-    model = nn.DataParallel(net, device_ids=device_ids).cuda()
-    model.load_state_dict(torch.load(os.path.join(opt.delog, 'net.pth')))
+    model = nn.DataParallel(Network(), device_ids=device_ids)
     model.eval()
+    model_info = torch.load('logs/checkpoint.pth.tar', map_location=torch.device('cpu'))
+    model.load_state_dict(model_info['state_dict'])
+    # model.eval()
 
     #Estimator Model
-    model_est = nn.DataParallel(est_net, device_ids=device_ids).cuda()
-    model_est.load_state_dict(torch.load(os.path.join(opt.delog, 'est_net.pth')))
+    model_est = nn.DataParallel(est_net, device_ids=device_ids)
+    model_est.load_state_dict(torch.load(os.path.join(opt.delog, 'est_net.pth'), map_location=torch.device('cpu')))
     model_est.eval()
 
     # load data info
@@ -110,8 +116,9 @@ def main():
             i_end = min(i+wbin, w)
             j = 0
             while j < h:
+                print(f'{i}-{w} {j}-{h} {datetime.now()}')
                 j_end = min(j+wbin, h)
-                patch = Img[i:i_end,j:j_end,:]
+                patch = Img[i:i_end, j:j_end, :]
                 patch_merge_out_numpy = denoiser(patch, c, pss, model, model_est, opt)
                 merge_out[i:i_end, j:j_end, :] = patch_merge_out_numpy        
                 j = j_end
