@@ -1,74 +1,85 @@
-import cv2
 import os
 import argparse
 import glob
-import numpy as np
-import torch
-import torch.nn as nn
-from torch.autograd import Variable
 from models import *
+from models_new import CBDNet
 from utils import *
-from PIL import Image
-import scipy.io as sio
 
 parser = argparse.ArgumentParser(description="PD-denoising")
-#model parameter
+
+# model parameter
 parser.add_argument("--num_of_layers", type=int, default=20, help="Number of total layers")
-parser.add_argument("--delog", type=str, default="logsdc", help='path of log and model files')
-parser.add_argument("--mode", type=str, default="M", help='DnCNN-B (B) or MC-AWGN-RVIN (MC)')
-#tested noise type
+parser.add_argument("--delog", type=str, default="logs", help='path of log and model files')
+parser.add_argument("--mode", type=str, default="M", help='CBDNet (CBD) or DnCNN-B (B) or MC-AWGN-RVIN (MC)')
+
+# tested noise type
 parser.add_argument("--color", type=int, default=0, help='[0]gray [1]color')
 parser.add_argument("--real_n", type=int, default=0, help='real noise or synthesis noise [0]synthetic noises [1]real noisy image wo gnd [2]real noisy image with gnd')
 parser.add_argument("--spat_n", type=int, default=0, help='whether to add spatial-variant signal-dependent noise, [0]no spatial [1]Gaussian-possion noise')
-#pixel-shuffling parameter
+
+# pixel-shuffling parameter
 parser.add_argument("--ps", type=int, default=0, help='pixel shuffle [0]no pixel-shuffle [1]adaptive pixel-ps [2]pre-set stride')
 parser.add_argument("--ps_scale", type=int, default=2, help='if ps==2, use this pixel shuffle stride')
-#down-scaling parameter
+
+# down-scaling parameter
 parser.add_argument("--scale", type=float, default=1, help='resize the original images')
 parser.add_argument("--rescale", type=int, default=1, help='resize it back to the origianl size after downsampling')
-#testing data path and processing
+
+# testing data path and processing
 parser.add_argument("--test_data", type=str, default='Set12', help='testing data path')
 parser.add_argument("--test_data_gnd", type=str, default='Set12', help='testing data ground truth path if it exists')
 parser.add_argument("--cond", type=int, default=1, help='Testing mode using noise map of: [0]Groundtruth [1]Estimated [2]External Input')
 parser.add_argument("--test_noise_level", nargs = "+",  type=int, help='input noise level while generating noisy images')
 parser.add_argument("--ext_test_noise_level", nargs = "+", type=int, help='external noise level input used if cond==2')
-#refining on the estimated noise map
+
+# refining on the estimated noise map
 parser.add_argument("--refine", type=int, default=0, help='[0]no refinement of estimation [1]refinement of the estimation')
 parser.add_argument("--refine_opt", type=int, default=0, help='[0]get the most frequent [1]the maximum [2]Gaussian smooth [3]average value of 0 and 1 opt')
 parser.add_argument("--zeroout", type=int, default=0, help='[0]no zeroing out [1]zeroing out some maps')
 parser.add_argument("--keep_ind", nargs = "+", type=int, help='[0 1 2]Gaussian [3 4 5]Impulse')
-#output options
+
+# output options
 parser.add_argument("--output_map", type=int, default=0, help='whether to output maps')
 parser.add_argument("--k", type=float, default=1, help='merging factor between details and background')
 parser.add_argument("--out_dir", type=str, default="results_bc", help='path of output files')
 
+# New options
+parser.add_argument("--pth_dir", type=str, default="results_bc", help='path of output files')
+
 opt = parser.parse_args()
-#the limitation range of each type of noise level: [0]Gaussian [1]Impulse
-limit_set = [[0,75], [0, 80]]
+
+# the limitation range of each type of noise level: [0]Gaussian [1]Impulse
+limit_set = [[0, 75], [0, 80]]
+
 
 def img_normalize(data):
     return data/255.
 
+
 def main():
     if not os.path.exists(opt.out_dir):
         os.makedirs(opt.out_dir)
+
     # Build model
-    print('Loading model ...\n')
+    net = None
     c = 1 if opt.color == 0 else 3
     if opt.mode == "MC":
-        net = DnCNN_c(channels=c, num_of_layers=opt.num_of_layers, num_of_est = 2 * c)
+        net = DnCNN_c(channels=c, num_of_layers=opt.num_of_layers, num_of_est=2 * c)
         est_net = Estimation_direct(c, 2 * c)
     elif opt.mode == "B":
         net = DnCNN(channels=c, num_of_layers=opt.num_of_layers)
+    elif opt.mode == 'CBD':
+        net = CBDNet()
 
+    print('Loading the model...\n')
     device_ids = [0]
-    model = nn.DataParallel(net, device_ids=device_ids).cuda()
-    model.load_state_dict(torch.load(os.path.join(opt.delog, 'net.pth')))
+    model = nn.DataParallel(net, device_ids=device_ids)  # .cuda()
+    model.load_state_dict(torch.load(os.path.join(opt.delog, 'checkpoint.pth.tar')))
     model.eval()
 
     #Estimator Model
     if opt.mode == "MC":
-        model_est = nn.DataParallel(est_net, device_ids=device_ids).cuda()
+        model_est = nn.DataParallel(est_net, device_ids=device_ids)  # .cuda()
         model_est.load_state_dict(torch.load(os.path.join(opt.delog, 'est_net.pth')))
         model_est.eval()
 
@@ -133,7 +144,7 @@ def main():
         INoisy = np2ts(noisy_img, opt.color)
         INoisy = torch.clamp(INoisy, 0., 1.)
         True_Res = INoisy - ISource
-        ISource, INoisy, True_Res = Variable(ISource.cuda(),volatile=True), Variable(INoisy.cuda(),volatile=True), Variable(True_Res.cuda(),volatile=True)
+        ISource, INoisy, True_Res = Variable(ISource.cuda(), volatile=True), Variable(INoisy.cuda(),volatile=True), Variable(True_Res.cuda(),volatile=True)
         
         
         if opt.mode == "MC":
@@ -226,6 +237,7 @@ def main():
             psnr = batch_PSNR(Out, ISource, 1.)
             psnr_test += psnr
             print("%s PSNR %f" % (f, psnr))
+
     #synthetic noises
     if opt.real_n == 0 or opt.real_n == 2:
         psnr_test /= len(files_source)

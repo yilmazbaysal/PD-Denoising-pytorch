@@ -124,9 +124,9 @@ class UNet(nn.Module):
         return out
 
 
-class Network(nn.Module):
+class CBDNet(nn.Module):
     def __init__(self):
-        super(Network, self).__init__()
+        super(CBDNet, self).__init__()
         self.fcn = FCN()
         self.unet = UNet()
 

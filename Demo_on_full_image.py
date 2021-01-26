@@ -11,6 +11,7 @@ from torch.autograd import Variable
 from models import *
 from utils import *
 from denoiser import *
+from models_new import CBDNet
 from PIL import Image
 import scipy.io as sio
 
@@ -62,10 +63,8 @@ def main():
     net = DnCNN_c(channels=c, num_of_layers=opt.num_of_layers, num_of_est = 2 * c)
     est_net = Estimation_direct(c, 2 * c)
 
-    from models_new import Network
-
     device_ids = [0]
-    model = nn.DataParallel(Network(), device_ids=device_ids)
+    model = nn.DataParallel(CBDNet(), device_ids=device_ids)
     model.eval()
     model_info = torch.load('logs/checkpoint.pth.tar', map_location=torch.device('cpu'))
     model.load_state_dict(model_info['state_dict'])

@@ -11,5 +11,5 @@ python Demo_on_full_image.py\
  --num_of_layers 20\
  --delog logs/logs_color_MC_AWGN_RVIN\
  --cond 1 --refine 0 --refine_opt 1\
- --test_data beijing\
+ --test_data real_patch\
  --out_dir results/beijing
