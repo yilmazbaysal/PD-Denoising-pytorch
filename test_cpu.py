@@ -73,15 +73,18 @@ def main():
 
     print('Loading the model...\n')
     device_ids = [0]
-    model = nn.DataParallel(net, device_ids=device_ids).cuda()
-    model.load_state_dict(torch.load(os.path.join(opt.delog, 'checkpoint.pth.tar')))
+    model = nn.DataParallel(net, device_ids=device_ids)
+    model_info = torch.load(os.path.join(opt.delog, 'checkpoint.pth.tar'),  map_location=torch.device('cpu'))
+    model.load_state_dict(model_info['state_dict'])
     model.eval()
 
     #Estimator Model
     if opt.mode == "MC":
-        model_est = nn.DataParallel(est_net, device_ids=device_ids).cuda()
-        model_est.load_state_dict(torch.load(os.path.join(opt.delog, 'est_net.pth')))
+        model_est = nn.DataParallel(est_net, device_ids=device_ids)
+        model_est.load_state_dict(torch.load(os.path.join(opt.delog, 'est_net.pth'), map_location=torch.device('cpu')))
         model_est.eval()
+    elif opt.mode == 'CBD':
+        model_est = net.fcn
 
     # load data info
     print('Loading data info ...\n')
@@ -103,7 +106,7 @@ def main():
         print(f)
         file_name = f.split('/')[-1].split('.')[0]
         if opt.real_n == 2:  #have ground truth
-            gnd_file_path = os.path.join('data',opt.test_data_gnd, file_name + '_mean.png')
+            gnd_file_path = os.path.join('data', opt.test_data_gnd, f.split('/')[-1])
             print(gnd_file_path)
             Img_gnd = cv2.imread(gnd_file_path)
             Img_gnd = Img_gnd[:,:,::-1]
@@ -117,6 +120,8 @@ def main():
         if opt.color == 0:
             Img = Img[:,:,0]  #For gray images
             Img = np.expand_dims(Img, 2)
+
+        original_noisy_image = torch.clamp(np2ts(img_normalize(np.float32(Img)), opt.color), 0., 1.)
         pss=1
         if opt.ps == 1:
             pss = decide_scale_factor(Img/255., model_est, color=opt.color,  thre = 0.008, plot_flag = 1, stopping = 4,mark = opt.out_dir + '/' +  file_name)[0]
@@ -144,11 +149,49 @@ def main():
         INoisy = np2ts(noisy_img, opt.color)
         INoisy = torch.clamp(INoisy, 0., 1.)
         True_Res = INoisy - ISource
-        ISource, INoisy, True_Res = Variable(ISource.cuda(), volatile=True), Variable(INoisy.cuda(),volatile=True), Variable(True_Res.cuda(),volatile=True)
+        with torch.no_grad():
+            ISource, INoisy, True_Res, original_noisy_image = Variable(ISource), Variable(INoisy), Variable(True_Res), Variable(original_noisy_image)
 
+        if opt.mode == 'CBD':
+            # obtain the corresponding input_map
+            if opt.cond == 0 or opt.cond == 2:  # if we use ground choose level or the given fixed level
+
+                # normalize noise leve map to [0,1]
+                noise_level_list_n = np.zeros((2 * c, 1))
+                for noise_type in range(2):
+                    for chn in range(c):
+                        noise_level_list_n[noise_type * c + chn] = normalize(
+                            a=noise_level_list[noise_type * 3 + chn],
+                            len_v=1,
+                            min_v=limit_set[noise_type][0],
+                            max_v=limit_set[noise_type][1]
+                        )
+
+                # generate noise maps
+                noise_map = np.zeros((1, 2 * c, Img.shape[0], Img.shape[1]))  # initialize the noise map
+                noise_map[0, :, :, :] = np.reshape(
+                    np.tile(noise_level_list_n, Img.shape[0] * Img.shape[1]), (2 * c, Img.shape[0], Img.shape[1])
+                )
+                NM_tensor = torch.from_numpy(noise_map).type(torch.FloatTensor)
+                with torch.no_grad():
+                    NM_tensor = Variable(NM_tensor)
+
+            # use the estimated noise-level map for blind denoising
+            elif opt.cond == 1:  # if we use the estimated map directly
+                NM_tensor = torch.clamp(model_est(INoisy), 0., 1.)
+                if opt.refine == 1:  # if we need to refine the map before putting it to the denoiser
+                    # refine_opt can be max, freq and their average
+                    NM_tensor_bundle = level_refine(NM_tensor, opt.refine_opt, 2 * c)
+                    NM_tensor = NM_tensor_bundle[0]
+                    noise_estimation_table = np.reshape(NM_tensor_bundle[1], (2 * c,))
+                if opt.zeroout == 1:
+                    NM_tensor = zeroing_out_maps(NM_tensor, opt.keep_ind)
+
+            noise_level, Res = model(INoisy, NM_tensor)
+            Out = torch.clamp(Res, 0., 1.)  # Output image after denoising
 
         if opt.mode == "MC":
-            # obtain the corrresponding input_map
+            # obtain the corresponding input_map
             if opt.cond == 0 or opt.cond == 2:  #if we use ground choose level or the given fixed level
                 #normalize noise leve map to [0,1]
                 noise_level_list_n = np.zeros((2*c, 1))
@@ -160,7 +203,9 @@ def main():
                 noise_map = np.zeros((1, 2 * c, Img.shape[0], Img.shape[1]))  #initialize the noise map
                 noise_map[0, :, :, :] = np.reshape(np.tile(noise_level_list_n, Img.shape[0] * Img.shape[1]), (2*c, Img.shape[0], Img.shape[1]))
                 NM_tensor = torch.from_numpy(noise_map).type(torch.FloatTensor)
-                NM_tensor = Variable(NM_tensor.cuda(),volatile=True)
+                with torch.no_grad():
+                    NM_tensor = Variable(NM_tensor)
+
             #use the estimated noise-level map for blind denoising
             elif opt.cond == 1:  #if we use the estimated map directly
                 NM_tensor = torch.clamp(model_est(INoisy), 0., 1.)
@@ -171,17 +216,26 @@ def main():
                 if opt.zeroout == 1:
                     NM_tensor = zeroing_out_maps(NM_tensor, opt.keep_ind)
             Res = model(INoisy, NM_tensor)
+            Out = torch.clamp(INoisy - Res, 0., 1.)  # Output image after denoising
 
         elif opt.mode == "B":
             Res = model(INoisy)
-
-        Out = torch.clamp(INoisy-Res, 0., 1.)  #Output image after denoising
+            Out = torch.clamp(INoisy-Res, 0., 1.)  #Output image after denoising
 
         #get the maximum denoising result
-        max_NM_tensor = level_refine(NM_tensor, 1, 2*c)[0]
-        max_Res = model(INoisy, max_NM_tensor)
-        max_Out = torch.clamp(INoisy - max_Res, 0., 1.)
-        max_out_numpy = visual_va2np(max_Out, opt.color, opt.ps, pss, 1, opt.rescale, w, h, c)
+        max_NM_tensor = level_refine(noise_level, 1, noise_level.shape[1])[0]
+        noise_level, max_Res = model(original_noisy_image, max_NM_tensor)
+        if opt.mode == 'CBD':
+            max_Out = torch.clamp(max_Res, 0., 1.)
+        else:
+            max_Out = torch.clamp(INoisy - max_Res, 0., 1.)
+
+        max_out_numpy = max_Out.data.cpu().numpy()
+        max_out_numpy = np.mean(max_out_numpy, 0)
+        max_out_numpy = np.transpose(max_out_numpy, (1, 2, 0)) * 255.0
+
+        # max_out_numpy = visual_va2np(max_Out, opt.color, opt.ps, pss, 1, opt.rescale, w, h, c)
+        # max_out_numpy = visual_va2np(max_Out, opt.color, 1, 1, 1, opt.rescale, w, h, c)
         del max_Out
         del max_Res
         del max_NM_tensor
@@ -199,13 +253,17 @@ def main():
                     if opt.color == 0:  #if gray image
                         re_test = np.expand_dims(re_test[:, :, :, 0], 3)
                     re_test_tensor = torch.from_numpy(np.transpose(re_test, (0,3,1,2))).type(torch.FloatTensor)
-                    re_test_tensor = Variable(re_test_tensor.cuda(),volatile=True)
+                    with torch.no_grad():
+                        re_test_tensor = Variable(re_test_tensor)
                     re_NM_tensor = torch.clamp(model_est(re_test_tensor), 0., 1.)
                     if opt.refine == 1:  #if we need to refine the map before putting it to the denoiser
                             re_NM_tensor_bundle = level_refine(re_NM_tensor, opt.refine_opt, 2*c)  #refine_opt can be max, freq and their average
                             re_NM_tensor = re_NM_tensor_bundle[0]
-                    re_Res = model(re_test_tensor, re_NM_tensor)
-                    Out2 = torch.clamp(re_test_tensor - re_Res, 0., 1.)
+                    noise_level, re_Res = model(re_test_tensor, re_NM_tensor)
+                    if opt.mode == 'CBD':
+                        Out2 = torch.clamp(re_Res, 0., 1.)
+                    else:
+                        Out2 = torch.clamp(re_test_tensor - re_Res, 0., 1.)
                     out_numpy[row*pss+column,:,:,:] = Out2.data.cpu().numpy()
                     del Out2
                     del re_Res
@@ -225,23 +283,25 @@ def main():
         k = opt.k
         merge_out_numpy = (1-k)*out_numpy + k*max_out_numpy
         merge_out_numpy = merge_out_numpy.astype(np.float32)
+
         cv2.imwrite(os.path.join(opt.out_dir, file_name + '_pss'+str(pss)+'_k'+str(k)+'.png'), merge_out_numpy[:,:,::-1])
         #If to output DND submission mat file, please uncomment the following lines
         #sio.savemat(os.path.join(opt.out_dir,f.split('/')[-1].split('.')[0]+'.mat'), {'Idenoised_crop': out_numpy/255.})
 
-        NM_Out = np2ts(out_numpy/255.)
+        NM_Out = np2ts(merge_out_numpy/255.)
 
         #quantitive evaluation
         psnr = 0
         if opt.real_n == 0 or opt.real_n == 2:
-            psnr = batch_PSNR(Out, ISource, 1.)
+            psnr = batch_PSNR(NM_Out, ISource, 1.)
             psnr_test += psnr
-            print("%s PSNR %f" % (f, psnr))
+            print("%s PSNR %f\n" % (f, psnr))
 
     #synthetic noises
     if opt.real_n == 0 or opt.real_n == 2:
         psnr_test /= len(files_source)
         print("\nPSNR on test data %f" % psnr_test)
+
 
 if __name__ == "__main__":
     main()
